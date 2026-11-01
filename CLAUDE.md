@@ -17,6 +17,8 @@
 - `POST {action:"add", id, k, t, n, d}`：記録を追加。`id` はアプリ側で作るUUIDで、同じIDは二重登録しない
 - `POST {action:"undo", id}`：取り消し（行は消さず「取消日時」を入れる）
 - `POST {action:"addresses", password}`：スクリプトプロパティ `ADDR_PASSWORD` と合えば `{ok, addresses:{名前: 住所}}`。10回間違えると10分止まる
+- `POST {action:"setAddress", password, name, address}`：同じパスワードで住所を登録・変更（住所は100文字まで）。知らない名前なら「家」タブに行を足す。`{ok, addresses, state}` を返す
+- アプリは住所を見たときのパスワードをメモリにだけ持ち、「隠す」で消す（保存はしない）
 - POST は `Content-Type: text/plain` のまま送る（Apps Script は CORS の事前確認に応答できないため）
 
 ## 在庫の計算

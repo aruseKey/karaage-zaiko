@@ -17,12 +17,15 @@
  *   POST {action:"add", id, k, t, n, d}       → 記録を追加（k: buy/give/collect, t: 店名か家の名前）
  *   POST {action:"undo", id}                   → 記録を取り消し（行は残し、取消日時を入れる）
  *   POST {action:"addresses", password}        → パスワードが合えば住所を返す
+ *   POST {action:"setAddress", password, name, address}
+ *                                              → パスワードが合えば住所を登録・変更（知らない名前なら家を追加）
  */
 
 const TAB = { places: "家", records: "記録", settings: "設定", notes: "メモ" };
 const KIND_JA = { buy: "購入", give: "分配", collect: "回収" };
 const KIND_EN = { "購入": "buy", "分配": "give", "回収": "collect" };
 const MAX_TEXT = 40;
+const MAX_ADDRESS = 100;
 const MAX_FAILS = 10;          // 住所パスワードの連続失敗の上限
 const LOCK_SECONDS = 600;      // 上限に達したら10分間受け付けない
 
@@ -42,6 +45,7 @@ function doPost(e) {
     if (body.action === "add") return json_(add_(body));
     if (body.action === "undo") return json_(undo_(body));
     if (body.action === "addresses") return json_(addresses_(body));
+    if (body.action === "setAddress") return json_(setAddress_(body));
     return json_(fail_("unknown_action"));
   } catch (err) {
     return json_(fail_("server_error", err));
@@ -129,23 +133,57 @@ function undo_(b) {
 }
 
 function addresses_(b) {
+  const bad = checkPassword_(b.password);
+  if (bad) return fail_(bad);
+  return { ok: true, addresses: addressMap_() };
+}
+
+// 住所の登録・変更。住所を見るのと同じパスワードが必要
+function setAddress_(b) {
+  const bad = checkPassword_(b.password);
+  if (bad) return fail_(bad);
+  const name = clean_(b.name);
+  const address = clean_(b.address, MAX_ADDRESS);
+  if (!name) return fail_("bad_name");
+  if (!address) return fail_("bad_address");
+
+  const lock = LockService.getScriptLock();
+  lock.waitLock(20000);
+  try {
+    ensurePlace_(name);
+    const sh = sheet_(TAB.places);
+    const row = findPlaceRow_(sh, name);
+    if (row < 0) return fail_("server_error");
+    sh.getRange(row, 3).setValue(asText_(address));
+  } finally {
+    lock.releaseLock();
+  }
+  return { ok: true, addresses: addressMap_(), state: state_() };
+}
+
+// 合っていれば ""、だめなら理由のコードを返す。10回続けて間違えると10分止める
+function checkPassword_(given) {
   const cache = CacheService.getScriptCache();
   const fails = Number(cache.get("addr_fails") || 0);
-  if (fails >= MAX_FAILS) return fail_("locked");
+  if (fails >= MAX_FAILS) return "locked";
   const password = PropertiesService.getScriptProperties().getProperty("ADDR_PASSWORD");
-  if (!password) return fail_("no_password_set");
-  if (String(b.password || "") !== password) {
+  if (!password) return "no_password_set";
+  if (String(given || "") !== password) {
     cache.put("addr_fails", String(fails + 1), LOCK_SECONDS);
     Utilities.sleep(1500);
-    return fail_("bad_password");
+    return "bad_password";
   }
+  return "";
+}
+
+function addressMap_() {
   const addresses = {};
   rows_(TAB.places).forEach(function (r) {
     const name = text_(r[0]);
     const address = text_(r[2]);
     if (name && address) addresses[name] = address;
   });
-  return { ok: true, addresses: addresses };
+  return addresses;
 }
 
 // 分配・回収で知らない名前が来たら「家」タブに行を足す（今の袋数の数式つき）
@@ -193,6 +231,16 @@ function settings_() {
   return map;
 }
 
+function findPlaceRow_(sh, name) {
+  const last = sh.getLastRow();
+  if (last < 2) return -1;
+  const names = sh.getRange(2, 1, last - 1, 1).getValues();
+  for (let i = 0; i < names.length; i++) {
+    if (text_(names[i][0]) === name) return i + 2;
+  }
+  return -1;
+}
+
 function findRow_(sh, id) {
   const last = sh.getLastRow();
   if (last < 2) return -1;
@@ -218,11 +266,11 @@ function num_(v) { const n = Number(v); return isFinite(n) ? n : 0; }
 
 function isInt_(n) { return typeof n === "number" && isFinite(n) && Math.floor(n) === n; }
 
-function clean_(v) {
+function clean_(v, max) {
   return String(v === null || v === undefined ? "" : v)
     .replace(/[\u0000-\u001f\u007f]/g, "")
     .trim()
-    .slice(0, MAX_TEXT);
+    .slice(0, max || MAX_TEXT);
 }
 
 // 先頭に ' を付けて、文字列のまま保存させる（数式・数値・日付に変換されないように）

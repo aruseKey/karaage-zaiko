@@ -70,6 +70,9 @@
   .base { text-align:center; font-size:12px; color:var(--sub); border:1px dashed #e2cfb4; border-radius:12px; padding:10px; margin:16px 0 0; }
   .empty { font-size:13px; color:var(--sub); padding:4px 2px; }
   .foot { font-size:12px; color:var(--sub); text-align:center; margin-top:18px; display:flex; justify-content:center; align-items:center; gap:10px; flex-wrap:wrap; }
+  details { margin-top:12px; border-top:1px solid var(--line); padding-top:8px; }
+  summary { font-size:14px; font-weight:600; color:var(--accent); cursor:pointer; padding:6px 0; }
+  details form { margin-top:6px; }
   .hidden { display:none !important; }
 </style>
 </head>
@@ -102,9 +105,22 @@
         </div>
         <div class="err" id="addrErr"></div>
       </div>
-      <div id="addrOpen" class="row hidden">
-        <span class="name">🔓 住所を表示しています</span>
-        <button id="addrHide" type="button" class="chip">隠す</button>
+      <div id="addrOpen" class="hidden">
+        <div class="row">
+          <span class="name">🔓 住所を表示しています</span>
+          <button id="addrHide" type="button" class="chip">隠す</button>
+        </div>
+        <details id="addrEdit">
+          <summary>住所を登録・変更する</summary>
+          <form id="f-addr" autocomplete="off" novalidate>
+            <label>家<select name="place"></select></label>
+            <label class="hidden" data-role="newWrap">名前<input name="newname" maxlength="30" placeholder="新しく預ける人の名前"></label>
+            <label>住所<input name="address" maxlength="100" placeholder="例：八王子市東中野○○-○ ○○ハイツ101号室"></label>
+            <div class="err" data-role="err"></div>
+            <button type="submit" data-label="登録する">登録する</button>
+            <div class="ok" data-role="ok"></div>
+          </form>
+        </details>
       </div>
     </div>
     <div id="notes"></div>
@@ -185,6 +201,7 @@ const VIEWS = ["stock", "buy", "give", "collect", "log"];
 const KLABEL = { buy: "購入", give: "分配", collect: "回収" };
 const WD = "日月火水木金土";
 const OTHER = "__other__";
+const NEW = "__new__";
 const POLL_MS = 30000;
 const $ = id => document.getElementById(id);
 const esc = s => String(s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
@@ -198,7 +215,7 @@ const uid = () => (crypto.randomUUID ? crypto.randomUUID() : Array.from(crypto.g
 
 const S = {
   loaded: false, loadErr: false, places: [], records: [], baseDate: "", baseTransit: 0, notes: [],
-  addr: null, lastSync: 0, writes: 0, refreshing: false,
+  addr: null, pw: "", lastSync: 0, writes: 0, refreshing: false,
   armed: null, armedTimer: null, logFilter: "all", logAsc: false,
 };
 
@@ -237,10 +254,13 @@ async function refresh() {
     render();
   }
 }
+// 通信が切れたときは1回だけやり直す（記録はIDつき、住所は上書きなので、二重にはならない）
+async function postRetry(body) {
+  try { return await apiPost(body); }
+  catch (e) { await sleep(600 + Math.random() * 900); return apiPost(body); }
+}
 async function post(body) {
-  let st;
-  try { st = await apiPost(body); }
-  catch (e) { await sleep(600 + Math.random() * 900); st = await apiPost(body); }  // 1回だけやり直す（IDがあるので二重にならない）
+  const st = await postRetry(body);
   S.writes++;
   applyState(st);
   render();
@@ -266,10 +286,13 @@ function compute() {
 }
 
 // ---- 表示 ----
+// 都道府県から書かれていなければ東京都をつけて地図を探す
+const mapsQuery = a => /^(東京都|北海道|大阪府|京都府|.{2,3}県)/.test(a) ? a : "東京都" + a;
+
 function placeCard(p) {
   let addr;
   if (S.addr && S.addr[p.name]) {
-    addr = `<div class="addr">📍 <a href="https://www.google.com/maps/search/?api=1&query=${encodeURIComponent("東京都" + S.addr[p.name])}" target="_blank" rel="noopener">${esc(S.addr[p.name])}</a></div>`;
+    addr = `<div class="addr">📍 <a href="https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(mapsQuery(S.addr[p.name]))}" target="_blank" rel="noopener">${esc(S.addr[p.name])}</a></div>`;
   } else if (p.hasAddress) {
     addr = `<div class="none">📍 住所はパスワードで表示</div>`;
   } else {
@@ -294,6 +317,15 @@ function fillSelect(sel, c, kind) {
   const list = kind === "collect" ? [...c.places].sort((a, b) => (b.stock > 0) - (a.stock > 0)) : c.places;
   for (const p of list) sel.appendChild(new Option(`${p.name}（今 ${p.stock}袋）`, p.name));
   sel.appendChild(new Option("その他（名前を入力）", OTHER));
+  if ([...sel.options].some(o => o.value === keep)) sel.value = keep;
+}
+
+function fillAddrSelect(sel, c) {
+  const keep = sel.value;
+  sel.textContent = "";
+  sel.appendChild(new Option("選んでください", ""));
+  for (const p of c.places) sel.appendChild(new Option(p.name + (S.addr && S.addr[p.name] ? "" : "（住所なし）"), p.name));
+  sel.appendChild(new Option("新しい家（名前を入力）", NEW));
   if ([...sel.options].some(o => o.value === keep)) sel.value = keep;
 }
 
@@ -358,6 +390,7 @@ function render() {
 
   $("addrLocked").classList.toggle("hidden", !!S.addr);
   $("addrOpen").classList.toggle("hidden", !S.addr);
+  if (S.addr) fillAddrSelect($("f-addr").place, c);
 
   for (const k of ["buy", "give", "collect"]) {
     const rows = c.items.filter(r => r.k === k).sort((a, b) => a.d === b.d ? (b.at || 0) - (a.at || 0) : (a.d < b.d ? 1 : -1));
@@ -462,7 +495,7 @@ async function showAddresses() {
   $("addrGo").disabled = true;
   try {
     const r = await apiPost({ action: "addresses", password: pw });
-    if (r.ok) { S.addr = r.addresses || {}; $("addrPw").value = ""; render(); return; }
+    if (r.ok) { S.addr = r.addresses || {}; S.pw = pw; $("addrPw").value = ""; render(); return; }
     err.textContent = {
       bad_password: "パスワードが違います。",
       locked: "何度も間違えたため、10分ほど待ってからもう一度試してください。",
@@ -472,6 +505,42 @@ async function showAddresses() {
     err.textContent = "通信できませんでした。電波の良いところで、もう一度押してください。";
   } finally {
     $("addrGo").disabled = false;
+  }
+}
+
+async function handleAddrSubmit() {
+  const f = $("f-addr");
+  const { err, ok, btn } = formParts(f);
+  err.textContent = ""; ok.textContent = "";
+  const isNew = f.place.value === NEW;
+  const name = isNew ? f.newname.value.trim() : f.place.value;
+  const address = f.address.value.trim();
+  if (!name) { err.textContent = isNew ? "名前を入れてください。" : "家を選んでください。"; return; }
+  if (!address) { err.textContent = "住所を入れてください。"; return; }
+  if (!S.pw) { err.textContent = "もう一度「住所を見る」からパスワードを入れてください。"; return; }
+  btn.disabled = true; btn.textContent = "登録中…";
+  try {
+    const r = await postRetry({ action: "setAddress", password: S.pw, name, address });
+    if (!r.ok) {
+      err.textContent = {
+        bad_password: "パスワードが変わったようです。「隠す」を押してから、もう一度パスワードを入れてください。",
+        locked: "何度も間違えたため、10分ほど待ってからもう一度試してください。",
+        unknown_action: "住所の登録はまだ使えません（Apps Scriptの更新が必要です）。",
+        bad_name: "名前を入れてください。",
+        bad_address: "住所を入れてください。",
+      }[r.error] || "登録できませんでした。";
+      return;
+    }
+    S.addr = r.addresses || S.addr;
+    if (r.state) { S.writes++; applyState(r.state); }
+    f.place.value = ""; f.newname.value = ""; f.address.value = "";
+    f.querySelector('[data-role="newWrap"]').classList.add("hidden");
+    ok.textContent = `登録しました：${name}`;
+    render();
+  } catch (e) {
+    err.textContent = "通信できませんでした。電波の良いところで、もう一度押してください。";
+  } finally {
+    btn.disabled = false; btn.textContent = btn.dataset.label;
   }
 }
 
@@ -496,7 +565,15 @@ $("v-log").addEventListener("click", e => {
 });
 $("addrGo").addEventListener("click", showAddresses);
 $("addrPw").addEventListener("keydown", e => { if (e.key === "Enter") showAddresses(); });
-$("addrHide").addEventListener("click", () => { S.addr = null; render(); });
+$("addrHide").addEventListener("click", () => { S.addr = null; S.pw = ""; $("addrEdit").open = false; render(); });
+$("f-addr").addEventListener("submit", e => { e.preventDefault(); handleAddrSubmit(); });
+$("f-addr").place.addEventListener("change", () => {
+  const f = $("f-addr");
+  const isNew = f.place.value === NEW;
+  f.querySelector('[data-role="newWrap"]').classList.toggle("hidden", !isNew);
+  f.address.value = !isNew && S.addr && S.addr[f.place.value] ? S.addr[f.place.value] : "";   // 今の住所を入れておくので、直すだけで済む
+  formParts(f).ok.textContent = "";
+});
 $("reload").addEventListener("click", refresh);
 window.addEventListener("hashchange", () => showView(hashView()));
 document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") refresh(); });
